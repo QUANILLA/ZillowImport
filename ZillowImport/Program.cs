@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.SqlClient;
 using System.IO;
 using System.Linq;
 using static System.Console;
@@ -14,7 +15,7 @@ namespace ZillowImport
 
         static readonly Dictionary<string, string> SqlTypeMapping = new Dictionary<string, string>
         {
-            ["string"] = "VARCHAR(400)",
+            ["String"] = "VARCHAR(400)",
             ["DateTime"] = "DATE"
         };
         static void Main(string[] args)
@@ -29,12 +30,13 @@ namespace ZillowImport
             string server = args[1];
             string database = args[2];
 
+            string connectionString = $"Server={server};Database={database};Trusted_Connection=True;";
             WriteLine($"file = {file}, server = {server}, database = {database}");
             using (ZillowImporter importer = new ZillowImporter(new CsvReader(new StreamReader(file), true)))
             {
                 string tableName = $"Zillow{Path.GetFileNameWithoutExtension(file)}";
                 DataTable dt = importer.DataTable;
-                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    {x.ColumnName} {SqlTypeMapping[x.DataType.Name]}")));
+                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    {x.ColumnName} {SqlTypeMapping[x.DataType.Name]} NOT NULL"));
                 string createTableScript = $@"
 IF (OBJECT_ID('{tableName}') IS NOT NULL)
 BEGIN
@@ -50,6 +52,25 @@ CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED
 )
 ) ON [PRIMARY]
 ";
+                using (SqlConnection conn = new SqlConnection(connectionString))
+                {
+                    using (SqlCommand cmd = new SqlCommand(createTableScript, conn))
+                    {
+                        
+                        cmd.CommandType = CommandType.Text;
+                        conn.Open();
+                        WriteLine($"executing {createTableScript}");
+                        cmd.ExecuteNonQuery();
+                    }
+                    WriteLine($"executing bulk copy...");
+                    using (var bc = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, null))
+                    {
+                        bc.DestinationTableName = tableName;
+                        bc.BatchSize = 1000;
+                        bc.BulkCopyTimeout = 3000;
+                        bc.WriteToServer(importer);
+                    }
+                }
             }
         }
 
@@ -74,13 +95,13 @@ CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED
                     ).ToList();
                 dates = datesAndIndexes.Select(x => x.Date).ToArray();
                 var firstDate = datesAndIndexes.FirstOrDefault();
-                if (firstDate != null)
-                {
-                    headersList.Add("Date");
-                }
                 dateColumnOrdinal = firstDate != null ? ((int?)(headersList.Count() - 1)) : null;
-                fieldCount = headersList.Count;
-                headers = headersList.ToArray();
+                fieldCount = firstDate != null ? firstDate.Index + 1 : headersList.Count;
+                headers =
+                    (
+                    from i in Enumerable.Range(0, fieldCount)
+                    select i != firstDate?.Index ? headersList[i] : "Date"
+                    ).ToArray(); 
                 ordinalMapping =
                     (
                     from i in Enumerable.Range(0, fieldCount)
@@ -160,6 +181,10 @@ CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED
 
                 var result = enumerator.MoveNext();
                 rowValues = result ? enumerator.Current : null;
+                if (rowValues != null)
+                {
+                    WriteLine($"returning row values: {string.Join(", ", from i in Enumerable.Range(0, fieldCount) select $"col: {headers[i]} value: '{rowValues[i]}")}");
+                }
                 return result;
             }
 
@@ -383,61 +408,6 @@ CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED
             }
             #endregion
 
-        }
-
-        private static int Read(string file, int count)
-        {
-            using (CsvReader csv = new CsvReader(new StreamReader(file), true))
-            {
-                int fieldCount = csv.FieldCount;
-
-                string[] headers = csv.GetFieldHeaders();
-                WriteLine("headers:");
-                WriteLine(string.Join(", ", headers));
-                var dates =
-                    (
-                    from i in Enumerable.Range(0, headers.Length)
-                    let header = headers[i]
-                    where IsMatch(header, @"\d{4}-\d{2}")
-                    let year = header.Substring(0, 4)
-                    let month = header.Substring(5, 2)
-                    select new { Index = i, Date = DateTime.Parse($"{month}/1/{year}") }
-                    ).ToList();
-                var firstDate = dates.FirstOrDefault();
-                var actualHeaderCount = firstDate?.Index ?? headers.Length;
-                var dateCol = firstDate?.Index;
-                WriteLine($"first date header = {firstDate.Index}");
-                while (csv.ReadNextRecord())
-                {
-                    var rowValues =
-                        (from col in Enumerable.Range(0, actualHeaderCount)
-                         select csv[col]
-                        ).ToList();
-                    if (dates.Count > 0)
-                    {
-                        rowValues.Add(null);
-                        foreach (var date in dates)
-                        {
-                            rowValues[dateCol.Value] = date.Date.ToShortDateString();
-                            PrintRow(rowValues);
-                        }
-                    }
-                    else
-                    {
-                        PrintRow(rowValues);
-                    }
-                    count++;
-                    if (count > 1)
-                        break;
-                }
-            }
-
-            return count;
-        }
-
-        private static void PrintRow(List<string> rowValues)
-        {
-            WriteLine(string.Join(",", rowValues));
         }
     }
 }
