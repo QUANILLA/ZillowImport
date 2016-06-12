@@ -11,6 +11,12 @@ namespace ZillowImport
 {
     class Program
     {
+
+        static readonly Dictionary<string, string> SqlTypeMapping = new Dictionary<string, string>
+        {
+            ["string"] = "VARCHAR(400)",
+            ["DateTime"] = "DATE"
+        };
         static void Main(string[] args)
         {
             if (args.Length < 3)
@@ -24,60 +30,103 @@ namespace ZillowImport
             string database = args[2];
 
             WriteLine($"file = {file}, server = {server}, database = {database}");
-            int count = 0;
-            count = Read(file, count);
+            using (ZillowImporter importer = new ZillowImporter(new CsvReader(new StreamReader(file), true)))
+            {
+                string tableName = $"Zillow{Path.GetFileNameWithoutExtension(file)}";
+                DataTable dt = importer.DataTable;
+                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    {x.ColumnName} {SqlTypeMapping[x.DataType.Name]}")));
+                string createTableScript = $@"
+IF (OBJECT_ID('{tableName}') IS NOT NULL)
+BEGIN
+    DROP TABLE {tableName}
+END
+
+CREATE TABLE {tableName}(
+	[ID] [int] IDENTITY(1,1) NOT NULL,
+	{columnsList}
+CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED 
+(
+	[ID] ASC
+)
+) ON [PRIMARY]
+";
+            }
         }
+
+        
 
         class ZillowImporter : IDataReader
         {
             public ZillowImporter(CsvReader csv)
             {
-                this.csvReader = csv;
-
-                var headers = csvReader.GetFieldHeaders().ToList();
+                csvReader = csv;
+                var headersList = csvReader.GetFieldHeaders().ToList();
                 WriteLine("headers:");
-                WriteLine(string.Join(", ", headers));
-                var dates =
+                WriteLine(string.Join(", ", headersList));
+                var datesAndIndexes =
                     (
-                    from i in Enumerable.Range(0, headers.Count)
-                    let header = headers[i]
+                    from i in Enumerable.Range(0, headersList.Count)
+                    let header = headersList[i]
                     where IsMatch(header, @"\d{4}-\d{2}")
                     let year = header.Substring(0, 4)
                     let month = header.Substring(5, 2)
                     select new { Index = i, Date = DateTime.Parse($"{month}/1/{year}") }
                     ).ToList();
-                var firstDate = dates.FirstOrDefault();
+                dates = datesAndIndexes.Select(x => x.Date).ToArray();
+                var firstDate = datesAndIndexes.FirstOrDefault();
                 if (firstDate != null)
                 {
-                    headers.Add("Date");
+                    headersList.Add("Date");
                 }
-                fieldCount = (firstDate?.Index + 1) ?? headers.Count;
+                dateColumnOrdinal = firstDate != null ? ((int?)(headersList.Count() - 1)) : null;
+                fieldCount = headersList.Count;
+                headers = headersList.ToArray();
                 ordinalMapping =
                     (
                     from i in Enumerable.Range(0, fieldCount)
-                    select new { Ordinal = i, Field = headers[i] }
+                    select new { Ordinal = i, Field = headersList[i] }
                     ).ToDictionary(x => x.Field, x => x.Ordinal);
 
-                var dateCol = firstDate?.Index;
+                dateCol = firstDate?.Index;
                 WriteLine($"first date header = {firstDate.Index}");
+                enumerable = GetRows();
+                enumerator = enumerable.GetEnumerator();
+                dataTable = new DataTable();
+                foreach (int i in Enumerable.Range(0, headers.Count()))
+                {
+                    Type type = i != dateColumnOrdinal ? typeof(string) : typeof(DateTime);
+                    string header = headers[i];
+                    dataTable.Columns.Add(header, type);
+                }
+            }
+
+            public string GetCreateTableScript()
+            {
+                string result = null;
+
+                return result;
+            }
+
+            private IEnumerable<List<object>> GetRows()
+            {
                 while (csvReader.ReadNextRecord())
                 {
                     var rowValues =
                         (from col in Enumerable.Range(0, fieldCount)
-                         select csvReader[col]
+                         select (object)csvReader[col]
                         ).ToList();
-                    if (dates.Count > 0)
+                    if (dates.Length > 0)
                     {
                         rowValues.Add(null);
                         foreach (var date in dates)
                         {
                             rowValues[dateCol.Value] = date.Date.ToShortDateString();
-                            PrintRow(rowValues);
+                            yield return rowValues;
                         }
                     }
                     else
                     {
-                        PrintRow(rowValues);
+                        yield return rowValues;
                     }
                 }
             }
@@ -91,17 +140,27 @@ namespace ZillowImport
             }
             public int GetOrdinal(string name)
             {
-                throw new NotImplementedException();
+                return ordinalMapping[name];
             }
 
             public object GetValue(int i)
             {
-                throw new NotImplementedException();
+                if (rowValues != null)
+                {
+                    return rowValues[i];
+                }
+                else
+                {
+                    throw new InvalidOperationException("No more rows");
+                }
             }
 
             public bool Read()
             {
-                throw new NotImplementedException();
+
+                var result = enumerator.MoveNext();
+                rowValues = result ? enumerator.Current : null;
+                return result;
             }
 
             #region Unused by SqlBulkCopy
@@ -143,6 +202,14 @@ namespace ZillowImport
                 get
                 {
                     throw new NotImplementedException();
+                }
+            }
+
+            public DataTable DataTable
+            {
+                get
+                {
+                    return dataTable;
                 }
             }
 
@@ -261,7 +328,6 @@ namespace ZillowImport
                 throw new NotImplementedException();
             }
 
-
             #endregion
 
             #region IDisposable Support
@@ -269,6 +335,14 @@ namespace ZillowImport
             private readonly CsvReader csvReader;
             private readonly int fieldCount;
             private readonly Dictionary<string, int> ordinalMapping;
+            private readonly int? dateCol;
+            private readonly DateTime[] dates;
+            private readonly IEnumerable<List<object>> enumerable;
+            private readonly IEnumerator<List<object>> enumerator;
+            private List<object> rowValues;
+            private readonly string[] headers;
+            private readonly int? dateColumnOrdinal;
+            private readonly DataTable dataTable;
 
             protected virtual void Dispose(bool disposing)
             {
@@ -277,6 +351,13 @@ namespace ZillowImport
                     if (disposing)
                     {
                         // TODO: dispose managed state (managed objects).
+                        try
+                        {
+                            csvReader.Dispose();
+                        }
+                        catch
+                        {
+                        }
                     }
 
                     // TODO: free unmanaged resources (unmanaged objects) and override a finalizer below.
