@@ -44,12 +44,7 @@ BEGIN
 END
 
 CREATE TABLE {tableName}(
-	[ID] [int] IDENTITY(1,1) NOT NULL,
 	{columnsList}
-CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED 
-(
-	[ID] ASC
-)
 ) ON [PRIMARY]
 ";
                 using (SqlConnection conn = new SqlConnection(connectionString))
@@ -181,10 +176,10 @@ CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED
 
                 var result = enumerator.MoveNext();
                 rowValues = result ? enumerator.Current : null;
-                if (rowValues != null)
-                {
-                    WriteLine($"returning row values: {string.Join(", ", from i in Enumerable.Range(0, fieldCount) select $"col: {headers[i]} value: '{rowValues[i]}")}");
-                }
+                //if (rowValues != null)
+                //{
+                //    WriteLine($"returning row values: {string.Join(", ", from i in Enumerable.Range(0, fieldCount) select $"col: {headers[i]} value: '{rowValues[i]}")}");
+                //}
                 return result;
             }
 
