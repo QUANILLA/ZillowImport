@@ -34,7 +34,7 @@ namespace ZillowImport
             WriteLine($"file = {file}, server = {server}, database = {database}");
             using (ZillowImporter importer = new ZillowImporter(new CsvReader(new StreamReader(file), true)))
             {
-                string tableName = $"Zillow{Path.GetFileNameWithoutExtension(file)}";
+                string tableName = $"[{Path.GetFileNameWithoutExtension(file)}]";
                 DataTable dt = importer.DataTable;
                 string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    [{x.ColumnName}] {SqlTypeMapping[x.DataType.Name]} NOT NULL"));
                 string createTableScript = $@"
