@@ -22,13 +22,13 @@ namespace ZillowImport
         {
             if (args.Length < 3)
             {
-                WriteLine("usage: ZillowImport <file> <server> <database>");
+                WriteLine("usage: ZillowImport <server> <database> <file>");
                 return;
             }
 
-            string file = args[0];
-            string server = args[1];
-            string database = args[2];
+            string server = args[0];
+            string database = args[1];
+            string file = args[2];
 
             string connectionString = $"Server={server};Database={database};Trusted_Connection=True;";
             WriteLine($"file = {file}, server = {server}, database = {database}");
@@ -36,7 +36,7 @@ namespace ZillowImport
             {
                 string tableName = $"Zillow{Path.GetFileNameWithoutExtension(file)}";
                 DataTable dt = importer.DataTable;
-                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    {x.ColumnName} {SqlTypeMapping[x.DataType.Name]} NOT NULL"));
+                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    [{x.ColumnName}] {SqlTypeMapping[x.DataType.Name]} NOT NULL"));
                 string createTableScript = $@"
 IF (OBJECT_ID('{tableName}') IS NOT NULL)
 BEGIN
@@ -58,6 +58,7 @@ CREATE TABLE {tableName}(
                         cmd.ExecuteNonQuery();
                     }
                     WriteLine($"executing bulk copy...");
+                    DateTime start = DateTime.Now;
                     using (var bc = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, null))
                     {
                         bc.DestinationTableName = tableName;
@@ -65,6 +66,8 @@ CREATE TABLE {tableName}(
                         bc.BulkCopyTimeout = 3000;
                         bc.WriteToServer(importer);
                     }
+                    TimeSpan elapsed = DateTime.Now - start;
+                    WriteLine($"copied {importer.RowsRead} rows in {elapsed.ToString()}");
                 }
             }
         }
@@ -104,7 +107,7 @@ CREATE TABLE {tableName}(
                     ).ToDictionary(x => x.Field, x => x.Ordinal);
 
                 dateCol = firstDate?.Index;
-                WriteLine($"first date header = {firstDate.Index}");
+                WriteLine($"first date header = {firstDate?.Index}");
                 enumerable = GetRows();
                 enumerator = enumerable.GetEnumerator();
                 dataTable = new DataTable();
@@ -173,13 +176,13 @@ CREATE TABLE {tableName}(
 
             public bool Read()
             {
-
+                RowsRead++;
                 var result = enumerator.MoveNext();
                 rowValues = result ? enumerator.Current : null;
-                //if (rowValues != null)
-                //{
-                //    WriteLine($"returning row values: {string.Join(", ", from i in Enumerable.Range(0, fieldCount) select $"col: {headers[i]} value: '{rowValues[i]}")}");
-                //}
+                if (RowsRead % 1000000 == 0)
+                {
+                    WriteLine($"{RowsRead} rows...");
+                }
                 return result;
             }
 
@@ -232,6 +235,8 @@ CREATE TABLE {tableName}(
                     return dataTable;
                 }
             }
+
+            public int RowsRead { get; private set; }
 
             public void Close()
             {
