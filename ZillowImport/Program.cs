@@ -15,14 +15,15 @@ namespace ZillowImport
 
         static readonly Dictionary<string, string> SqlTypeMapping = new Dictionary<string, string>
         {
-            ["String"] = "VARCHAR(400)",
-            ["DateTime"] = "DATE"
+            ["String"] = "VARCHAR(400) NOT NULL",
+            ["DateTime"] = "DATE NOT NULL",
+            ["Double"] = "FLOAT NULL"
         };
         static void Main(string[] args)
         {
             if (args.Length < 3)
             {
-                WriteLine("usage: ZillowImport <server> <database> <file>");
+                WriteLine("usage: ZillowImport <server> <database> <file> [-d]");
                 return;
             }
 
@@ -32,11 +33,12 @@ namespace ZillowImport
 
             string connectionString = $"Server={server};Database={database};Trusted_Connection=True;";
             WriteLine($"file = {file}, server = {server}, database = {database}");
-            using (ZillowImporter importer = new ZillowImporter(new CsvReader(new StreamReader(file), true)))
+            bool debug = args.Length > 3;
+            using (ZillowImporter importer = new ZillowImporter(new CsvReader(new StreamReader(file), true), debug))
             {
                 string tableName = $"[{Path.GetFileNameWithoutExtension(file)}]";
                 DataTable dt = importer.DataTable;
-                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    [{x.ColumnName}] {SqlTypeMapping[x.DataType.Name]} NOT NULL"));
+                string columnsList = string.Join("," + Environment.NewLine, dt.Columns.Cast<DataColumn>().Select(x => $"    [{x.ColumnName}] {SqlTypeMapping[x.DataType.Name]}"));
                 string createTableScript = $@"
 IF (OBJECT_ID('{tableName}') IS NOT NULL)
 BEGIN
@@ -51,7 +53,7 @@ CREATE TABLE {tableName}(
                 {
                     using (SqlCommand cmd = new SqlCommand(createTableScript, conn))
                     {
-                        
+
                         cmd.CommandType = CommandType.Text;
                         conn.Open();
                         WriteLine($"executing {createTableScript}");
@@ -82,23 +84,24 @@ CREATE TABLE {tableName}(
                 var headersList = csvReader.GetFieldHeaders().ToList();
                 WriteLine("headers:");
                 WriteLine(string.Join(", ", headersList));
-                var datesAndIndexes =
+                datesAndIndexes =
                     (
                     from i in Enumerable.Range(0, headersList.Count)
                     let header = headersList[i]
                     where IsMatch(header, @"\d{4}-\d{2}")
                     let year = header.Substring(0, 4)
                     let month = header.Substring(5, 2)
-                    select new { Index = i, Date = DateTime.Parse($"{month}/1/{year}") }
+                    select new DateAndIndex { Index = i, Date = DateTime.Parse($"{month}/1/{year}") }
                     ).ToList();
-                dates = datesAndIndexes.Select(x => x.Date).ToArray();
+                //dates = datesAndIndexes.Select(x => x.Date).ToArray();
                 var firstDate = datesAndIndexes.FirstOrDefault();
-                dateColumnOrdinal = firstDate != null ? ((int?)(headersList.Count() - 1)) : null;
-                fieldCount = firstDate != null ? firstDate.Index + 1 : headersList.Count;
+                dateColumnOrdinal = firstDate?.Index;
+                valueColumnOrdinal = dateColumnOrdinal + 1;
+                fieldCount = (valueColumnOrdinal + 1) ?? headersList.Count;
                 headers =
                     (
                     from i in Enumerable.Range(0, fieldCount)
-                    select i != firstDate?.Index ? headersList[i] : "Date"
+                    select (i == dateColumnOrdinal ? "Date" : ( i == valueColumnOrdinal ? "Value" : headersList[i]) )
                     ).ToArray(); 
                 ordinalMapping =
                     (
@@ -113,10 +116,15 @@ CREATE TABLE {tableName}(
                 dataTable = new DataTable();
                 foreach (int i in Enumerable.Range(0, headers.Count()))
                 {
-                    Type type = i != dateColumnOrdinal ? typeof(string) : typeof(DateTime);
+                    Type type = (i == dateColumnOrdinal ? typeof(DateTime) : (i == valueColumnOrdinal ? typeof(double) : typeof(string)));
                     string header = headers[i];
                     dataTable.Columns.Add(header, type);
                 }
+            }
+
+            public ZillowImporter(CsvReader csv, bool debug) : this(csv)
+            {
+                this.debug = debug;
             }
 
             public string GetCreateTableScript()
@@ -126,7 +134,7 @@ CREATE TABLE {tableName}(
                 return result;
             }
 
-            private IEnumerable<List<object>> GetRows()
+            public IEnumerable<List<object>> GetRows()
             {
                 while (csvReader.ReadNextRecord())
                 {
@@ -134,12 +142,15 @@ CREATE TABLE {tableName}(
                         (from col in Enumerable.Range(0, fieldCount)
                          select (object)csvReader[col]
                         ).ToList();
-                    if (dates.Length > 0)
+                    if (datesAndIndexes.Count() > 0)
                     {
                         rowValues.Add(null);
-                        foreach (var date in dates)
+                        rowValues.Add(null);
+                        foreach (var date in datesAndIndexes)
                         {
                             rowValues[dateCol.Value] = date.Date.ToShortDateString();
+                            string stringValue = csvReader[date.Index];
+                            rowValues[valueColumnOrdinal.Value] = string.IsNullOrWhiteSpace(stringValue) ? null : stringValue;
                             yield return rowValues;
                         }
                     }
@@ -179,6 +190,10 @@ CREATE TABLE {tableName}(
                 RowsRead++;
                 var result = enumerator.MoveNext();
                 rowValues = result ? enumerator.Current : null;
+                if (debug)
+                {
+                    WriteLine($"row {RowsRead} : {string.Join(", ", rowValues)}");
+                }
                 if (RowsRead % 1000000 == 0)
                 {
                     WriteLine($"{RowsRead} rows...");
@@ -361,13 +376,16 @@ CREATE TABLE {tableName}(
             private readonly int fieldCount;
             private readonly Dictionary<string, int> ordinalMapping;
             private readonly int? dateCol;
-            private readonly DateTime[] dates;
+            //private readonly DateTime[] dates;
             private readonly IEnumerable<List<object>> enumerable;
             private readonly IEnumerator<List<object>> enumerator;
             private List<object> rowValues;
             private readonly string[] headers;
             private readonly int? dateColumnOrdinal;
             private readonly DataTable dataTable;
+            private readonly int? valueColumnOrdinal;
+            private readonly List<DateAndIndex> datesAndIndexes;
+            private bool debug;
 
             protected virtual void Dispose(bool disposing)
             {
@@ -405,6 +423,12 @@ CREATE TABLE {tableName}(
                 Dispose(true);
                 // TODO: uncomment the following line if the finalizer is overridden above.
                 // GC.SuppressFinalize(this);
+            }
+
+            private class DateAndIndex
+            {
+                public DateTime Date { get; set; }
+                public int Index { get; set; }
             }
             #endregion
 
